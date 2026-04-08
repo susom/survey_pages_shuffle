@@ -1,0 +1,83 @@
+{
+    "name": "Survey Pages Shuffle",
+
+    "namespace": "Stanford\\SurveyPagesShuffle",
+
+    "description": "Randomizes the order of pages within a single survey for each respondent. Survey pages are defined by Section Headers in REDCap's Online Designer.",
+
+    "documentation": "README.md",
+
+    "framework-version": 16,
+
+    "authors": [
+        {
+            "name": "Ihab Zeedia",
+            "email": "ihab.zeedia@stanford.edu",
+            "institution": "Stanford Health Care"
+        }
+    ],
+
+    "permissions": [
+        "redcap_survey_page_top"
+    ],
+
+    "enable-every-page-hooks-on-system-pages": false,
+
+    "enable-ajax-logging": false,
+
+    "auth-ajax-actions": [],
+
+    "no-auth-ajax-actions": [
+        "getShuffleOrder"
+    ],
+
+    "links": {
+        "project": [],
+        "control-center": []
+    },
+
+    "no-auth-pages": [],
+
+    "project-settings": [
+        {
+            "key": "shuffle-instruments",
+            "name": "Instruments to Shuffle Pages",
+            "type": "sub_settings",
+            "repeatable": true,
+            "sub_settings": [
+                {
+                    "key": "instrument",
+                    "name": "Instrument (Survey) to shuffle pages for",
+                    "type": "form-list"
+                },
+                {
+                    "key": "exclude-first-page",
+                    "name": "Exclude first page from shuffle (keep it as the landing page)",
+                    "type": "checkbox"
+                },
+                {
+                    "key": "exclude-last-page",
+                    "name": "Exclude last page from shuffle (keep it as the final page)",
+                    "type": "checkbox"
+                },
+                {
+                    "key": "page-order-field",
+                    "name": "Field to store the shuffled page order (optional, text field)",
+                    "type": "field-list",
+                    "field-type": "text"
+                }
+            ]
+        }
+    ],
+
+    "system-settings": [],
+
+    "crons": [],
+
+    "compatibility": {
+        "php-version-min": "7.4.0",
+        "php-version-max": "",
+        "redcap-version-min": "13.0.0",
+        "redcap-version-max": ""
+    }
+}
