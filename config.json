@@ -24,10 +24,7 @@
 
     "auth-ajax-actions": [],
 
-    "no-auth-ajax-actions": [
-        "getShuffleOrder",
-        "getPageHash"
-    ],
+    "no-auth-ajax-actions": [],
 
     "links": {
         "project": [],

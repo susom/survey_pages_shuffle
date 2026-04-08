@@ -111,7 +111,54 @@ class SurveyPagesShuffle extends AbstractExternalModule
     }
 
     /* ================================================================ */
-    /*  HOOK — redcap_survey_page_top                                   */
+    /*  HOOK 1 — redcap_every_page_before_render                       */
+    /*                                                                  */
+    /*  Runs BEFORE initPageNumCheck() and setPageNum().                */
+    /*  On POST we read __sps_target__ (injected by our JS) and        */
+    /*  rewrite $_POST['__page__'] to a value that will NOT match any   */
+    /*  real page, causing setPageNum() to skip its ±1 logic.  We also */
+    /*  pre-set $_GET['__page__'] to the desired target page, which    */
+    /*  setPageNum() will leave untouched.                             */
+    /*                                                                  */
+    /*  Because $_POST['__page__'] does not match $pageFields[X],      */
+    /*  REDCap's data-save filter (which strips fields not on the      */
+    /*  "current" page) is also bypassed, so ALL field data is saved.  */
+    /* ================================================================ */
+    public function redcap_every_page_before_render($project_id)
+    {
+        try {
+            // Only act on survey pages with a valid project context
+            if (empty($project_id))          return;
+            if (empty($_GET['s']))           return;
+            if ($_SERVER['REQUEST_METHOD'] !== 'POST') return;
+            if (!isset($_POST['__sps_target__']))      return;
+
+            $target = (int)$_POST['__sps_target__'];
+            if ($target < 1) return;
+
+            // Set the page REDCap will render
+            $_GET['__page__'] = $target;
+
+            // Make __page__ a value that does NOT exist in $pageFields
+            // so setPageNum() skips its ±1 block and the data-save
+            // filter doesn't strip any fields.
+            $fakePageNum = 99999;
+            $_POST['__page__']      = (string)$fakePageNum;
+            $_POST['__page_hash__'] = \Survey::getPageNumHash($fakePageNum);
+
+            // Clean up our custom field
+            unset($_POST['__sps_target__']);
+        } catch (\Throwable $e) {
+            error_log("SPS ERROR in before_render: " . $e->getMessage());
+        }
+    }
+
+    /* ================================================================ */
+    /*  HOOK 2 — redcap_survey_page_top                                */
+    /*                                                                  */
+    /*  Runs AFTER the page has been determined and data saved.         */
+    /*  Initialises the shuffle order on first visit, saves order to    */
+    /*  a field, injects the JS that intercepts Next/Back buttons.     */
     /* ================================================================ */
     public function redcap_survey_page_top(
         $project_id, $record, $instrument, $event_id,
@@ -167,55 +214,41 @@ class SurveyPagesShuffle extends AbstractExternalModule
             $_SESSION[$sk]['saved'] = true;
         }
 
-        /*
-         * Precompute page hashes for every possible __page__ value we might
-         * POST.  The range of "fake" page values is 0 … total+1 because
-         * REDCap does ±1 on the posted value to get the target page.
-         */
-        $pageHashes = [];
-        for ($p = 0; $p <= $total + 1; $p++) {
-            $pageHashes[$p] = \Survey::getPageNumHash($p);
-        }
-
-        $v2rJson    = json_encode($v2r);
-        $r2vJson    = json_encode($r2v);
-        $hashesJson = json_encode($pageHashes);
+        /* Pass mapping to JavaScript */
+        $v2rJson = json_encode($v2r);
+        $r2vJson = json_encode($r2v);
         ?>
         <script>
         $(function(){
-            var v2r    = <?=$v2rJson?>,
-                r2v    = <?=$r2vJson?>,
-                hashes = <?=$hashesJson?>,
-                total  = <?=(int)$total?>,
-                curR   = <?=(int)$curReal?>,
-                curV   = <?=(int)$curVirtual?>;
+            var v2r   = <?=$v2rJson?>,
+                r2v   = <?=$r2vJson?>,
+                total = <?=(int)$total?>,
+                curR  = <?=(int)$curReal?>,
+                curV  = <?=(int)$curVirtual?>;
 
             /* --- Fix page counter display --- */
             var el = document.getElementById('surveypagenum') || document.getElementById('pagecounter');
             if (el) el.innerHTML = el.innerHTML.replace(/\d+(\s*(?:of|\/)\s*)\d+/i, curV + '$1' + total);
 
-            /* --- Intercept form submission to rewrite __page__ --- */
+            /* --- Add hidden field for our target page --- */
             var form = document.getElementById('form');
             if (!form) return;
 
-            var pageField = form.querySelector('input[name="__page__"]');
-            var hashField = form.querySelector('input[name="__page_hash__"]');
-            if (!pageField || !hashField) return;
+            var spsField = document.createElement('input');
+            spsField.type  = 'hidden';
+            spsField.name  = '__sps_target__';
+            spsField.value = '';
+            form.appendChild(spsField);
 
-            /* Override dataEntrySubmit to rewrite page before REDCap processes */
+            /* Override dataEntrySubmit to set the target page before submission */
             var origSubmit = window.dataEntrySubmit;
             window.dataEntrySubmit = function(ob) {
                 var action = (ob && ob.name) ? ob.name : '';
 
                 if (action === 'submit-btn-saveprevpage') {
-                    /* Going back: REDCap will do posted_page - 1 to get target */
                     var prevV = curV - 1;
                     if (prevV >= 1) {
-                        var targetR = v2r[String(prevV)];
-                        /* Need: posted - 1 = targetR  →  posted = targetR + 1 */
-                        var newPage = targetR + 1;
-                        pageField.value = newPage;
-                        hashField.value = hashes[String(newPage)] || '';
+                        spsField.value = v2r[String(prevV)];
                     }
                     return origSubmit(ob);
                 }
@@ -223,17 +256,13 @@ class SurveyPagesShuffle extends AbstractExternalModule
                 if (action === 'submit-btn-saverecord') {
                     var nextV = curV + 1;
                     if (nextV <= total) {
-                        var targetR = v2r[String(nextV)];
-                        /* Need: posted + 1 = targetR  →  posted = targetR - 1 */
-                        var newPage = targetR - 1;
-                        pageField.value = newPage;
-                        hashField.value = hashes[String(newPage)] || '';
+                        spsField.value = v2r[String(nextV)];
                     }
-                    /* If nextV > total → last page, normal submit, no rewrite */
+                    /* nextV > total → last page, normal submit, spsField stays empty */
                     return origSubmit(ob);
                 }
 
-                /* Any other button (save & return later, etc.) — pass through */
+                /* Any other button — pass through */
                 return origSubmit(ob);
             };
         });
