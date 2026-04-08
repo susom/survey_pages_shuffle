@@ -17,9 +17,6 @@
         }
     ],
 
-    "permissions": [
-        "redcap_survey_page_top"
-    ],
 
     "enable-every-page-hooks-on-system-pages": false,
 
@@ -28,7 +25,8 @@
     "auth-ajax-actions": [],
 
     "no-auth-ajax-actions": [
-        "getShuffleOrder"
+        "getShuffleOrder",
+        "getPageHash"
     ],
 
     "links": {
@@ -51,14 +49,9 @@
                     "type": "form-list"
                 },
                 {
-                    "key": "exclude-first-page",
-                    "name": "Exclude first page from shuffle (keep it as the landing page)",
-                    "type": "checkbox"
-                },
-                {
-                    "key": "exclude-last-page",
-                    "name": "Exclude last page from shuffle (keep it as the final page)",
-                    "type": "checkbox"
+                    "key": "shuffle-note",
+                    "name": "Note: The first and last pages are always kept in their original positions. Only pages 2 through N-1 are shuffled. This ensures REDCap's Submit button on the last page works correctly. You need at least 4 pages for shuffling to take effect.",
+                    "type": "descriptive"
                 },
                 {
                     "key": "page-order-field",

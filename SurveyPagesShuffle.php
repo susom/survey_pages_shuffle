@@ -1,21 +1,15 @@
 <?php
 /**
- * Survey Pages Shuffle - REDCap External Module
+ * Survey Pages Shuffle — REDCap External Module
  *
- * Randomizes the order of pages within a single survey for each respondent.
- * Survey pages are defined by Section Headers in REDCap's Online Designer.
+ * Randomizes page order within a single multi-page survey.
+ * Pages are defined by Section Headers in the Online Designer.
  *
- * Strategy:
- *   - On redcap_survey_page_top, compute the list of "real" REDCap pages
- *     (groups of fields delimited by section headers) for the configured instrument.
- *   - On the very first page visit (real page 1, no prior shuffle in session),
- *     generate a shuffled order and store it in $_SESSION.
- *   - On every page, inject JavaScript that intercepts the Next/Back buttons
- *     to rewrite the hidden __page__ input to the correct shuffled real page
- *     before form submission, and updates the visible page counter.
- *   - Optionally saves the shuffled page order to a REDCap text field.
+ * First page and last page are ALWAYS kept in place (page 1 stays first,
+ * page N stays last).  Only pages 2 … N-1 are shuffled.  This guarantees
+ * that REDCap's native Submit button on the last page works normally.
  *
- * @author  Ihab Zeedia <ihab.zeedia@stanford.edu>
+ * @author Ihab Zeedia <ihab.zeedia@stanford.edu>
  */
 
 namespace Stanford\SurveyPagesShuffle;
@@ -25,246 +19,225 @@ use REDCap;
 
 class SurveyPagesShuffle extends AbstractExternalModule
 {
-    public function __construct()
+    /* ---------- helpers ---------- */
+
+    private function skey(string $hash): string
     {
-        parent::__construct();
+        return "survey_pages_shuffle_{$hash}";
     }
 
-    // -------------------------------------------------------------------------
-    // Build a real-page → field-list map for an instrument.
-    // Page number increments whenever a field carries a non-empty
-    // element_preceding_header (= section header) and is not the very first field.
-    // -------------------------------------------------------------------------
-    private function buildPageMap(string $instrument): array
+    /**
+     * Look up total page count, form name and project id from the survey hash.
+     */
+    private function countPagesFromDB(string $surveyHash): array
     {
-        global $Proj, $table_pk;
+        $sql = "SELECT s.project_id, s.form_name, s.question_by_section
+                FROM redcap_surveys s
+                JOIN redcap_surveys_participants p ON s.survey_id = p.survey_id
+                WHERE p.hash = '" . db_escape($surveyHash) . "'
+                  AND p.event_id IS NOT NULL
+                LIMIT 1";
+        $q = db_query($sql);
+        if (!$q || db_num_rows($q) === 0) return [0, null, null];
+        $row = db_fetch_assoc($q);
 
-        if (empty($Proj->forms[$instrument])) {
-            return [];
-        }
+        $pid  = (int)$row['project_id'];
+        $form = $row['form_name'];
+        if (!(int)$row['question_by_section']) return [1, $form, $pid];
 
-        $pageMap = [];
-        $page    = 1;
-        $isFirst = true;
+        $pk = db_result(db_query(
+            "SELECT field_name FROM redcap_metadata WHERE project_id = $pid ORDER BY field_order LIMIT 1"
+        ), 0);
 
-        foreach (array_keys($Proj->forms[$instrument]['fields']) as $fieldName) {
-            if ($fieldName === $table_pk || $fieldName === $instrument . '_complete') {
-                continue;
+        $q2 = db_query(
+            "SELECT field_name, element_preceding_header FROM redcap_metadata
+             WHERE project_id = $pid AND form_name = '" . db_escape($form) . "'
+             ORDER BY field_order"
+        );
+        $pages = 1;
+        $first = true;
+        while ($r = db_fetch_assoc($q2)) {
+            if ($r['field_name'] === $pk || $r['field_name'] === "{$form}_complete") continue;
+            if (!$first && $r['element_preceding_header'] !== null && $r['element_preceding_header'] !== '') {
+                $pages++;
             }
-            if (!$isFirst && !empty($Proj->metadata[$fieldName]['element_preceding_header'])) {
-                $page++;
-            }
-            $pageMap[$page][] = $fieldName;
-            $isFirst          = false;
+            $first = false;
         }
-
-        return $pageMap;
+        return [$pages, $form, $pid];
     }
 
-    // -------------------------------------------------------------------------
-    // Return the config block for a given instrument (or null if not configured)
-    // -------------------------------------------------------------------------
-    private function getInstrumentConfig(string $instrument): ?array
+    private function isFormConfigured(string $form): bool
     {
-        $instruments  = $this->getProjectSetting('instrument');
-        $exclFirst    = $this->getProjectSetting('exclude-first-page');
-        $exclLast     = $this->getProjectSetting('exclude-last-page');
-        $orderFields  = $this->getProjectSetting('page-order-field');
+        return in_array($form, $this->getProjectSetting('instrument') ?? [], true);
+    }
 
-        if (empty($instruments)) {
-            return null;
+    private function getOrderField(string $form): ?string
+    {
+        $instruments = $this->getProjectSetting('instrument')       ?? [];
+        $oF          = $this->getProjectSetting('page-order-field') ?? [];
+        foreach ($instruments as $i => $inst) {
+            if ($inst === $form) return $oF[$i] ?? null;
         }
-
-        foreach ((array)$instruments as $i => $inst) {
-            if ($inst === $instrument) {
-                return [
-                    'instrument'    => $inst,
-                    'exclude_first' => !empty($exclFirst[$i]),
-                    'exclude_last'  => !empty($exclLast[$i]),
-                    'order_field'   => $orderFields[$i] ?? null,
-                ];
-            }
-        }
-
         return null;
     }
 
-    // -------------------------------------------------------------------------
-    // Session key unique to this project + survey response
-    // -------------------------------------------------------------------------
-    private function sessionKey(int $projectId, string $surveyHash): string
+    /**
+     * Build the shuffled page order.
+     * Page 1 is always first, page N is always last.
+     * Only pages 2 … N-1 are shuffled.
+     * Needs at least 4 pages to actually shuffle anything.
+     */
+    private function makeOrder(int $total): array
     {
-        return "sps_{$projectId}_{$surveyHash}";
+        if ($total <= 3) return range(1, $total);
+        $mid = range(2, $total - 1);
+        shuffle($mid);
+        return array_merge([1], $mid, [$total]);
     }
 
-    // -------------------------------------------------------------------------
-    // Generate a shuffled order array (1-based real page numbers).
-    // e.g. for totalPages=4, excludeFirst=true, excludeLast=false
-    //      might return [1, 3, 2, 4]
-    // -------------------------------------------------------------------------
-    private function generateShuffleOrder(
-        int  $totalPages,
-        bool $excludeFirst,
-        bool $excludeLast
-    ): array {
-        if ($totalPages <= 1) {
-            return [1];
+    /**
+     * Return two maps:
+     *   $v2r  virtual-position → real-page
+     *   $r2v  real-page → virtual-position
+     */
+    private function maps(array $order): array
+    {
+        $v2r = $r2v = [];
+        foreach ($order as $vi => $rp) {
+            $v2r[$vi + 1]  = (int)$rp;
+            $r2v[(int)$rp] = $vi + 1;
         }
-
-        $start  = $excludeFirst ? 2 : 1;
-        $end    = $excludeLast  ? ($totalPages - 1) : $totalPages;
-
-        $middle = range($start, $end);
-        shuffle($middle);
-
-        $order = [];
-        if ($excludeFirst) {
-            $order[] = 1;
-        }
-        foreach ($middle as $p) {
-            $order[] = $p;
-        }
-        if ($excludeLast) {
-            $order[] = $totalPages;
-        }
-
-        return $order;
+        return [$v2r, $r2v];
     }
 
-    // -------------------------------------------------------------------------
-    // redcap_survey_page_top
-    // Fires near the top of every rendered survey page (after HTML <head> is
-    // emitted but before form fields are printed).
-    // -------------------------------------------------------------------------
+    /* ================================================================ */
+    /*  HOOK — redcap_survey_page_top                                   */
+    /* ================================================================ */
     public function redcap_survey_page_top(
-        $project_id,
-        $record,
-        $instrument,
-        $event_id,
-        $group_id,
-        $survey_hash,
-        $response_id,
-        $repeat_instance
+        $project_id, $record, $instrument, $event_id,
+        $group_id, $survey_hash, $response_id, $repeat_instance
     ) {
-        $config = $this->getInstrumentConfig((string)$instrument);
-        if (empty($config)) {
-            return;
-        }
-
-        global $Proj;
-
-        // Build the real page map
-        $pageMap    = $this->buildPageMap((string)$instrument);
-        $totalPages = count($pageMap);
-
-        if ($totalPages <= 1) {
-            return; // nothing to shuffle
-        }
-
-        // Current real page (REDCap sets this GET param before calling the hook)
-        $currentRealPage = max(1, (int)($_GET['__page__'] ?? 1));
-
-        // ---- Session management ----
-        $sessionKey = $this->sessionKey((int)$project_id, (string)$survey_hash);
-
-        if (!isset($_SESSION[$sessionKey])) {
-            // Generate shuffle on first page load of this response
-            $order = $this->generateShuffleOrder(
-                $totalPages,
-                (bool)$config['exclude_first'],
-                (bool)$config['exclude_last']
+        try {
+            $this->handleSurveyPageTop(
+                (int)$project_id, $record, (string)$instrument,
+                (int)$event_id, (string)$survey_hash
             );
+        } catch (\Throwable $e) {
+            error_log("SPS ERROR: " . $e->getMessage());
+        }
+    }
 
-            $_SESSION[$sessionKey] = [
+    private function handleSurveyPageTop(
+        int $project_id, $record, string $instrument,
+        int $event_id, string $survey_hash
+    ): void {
+        if (empty($survey_hash)) return;
+
+        $sk = $this->skey($survey_hash);
+
+        /* --- Initialise the shuffle on first visit --- */
+        if (!isset($_SESSION[$sk])) {
+            [$totalPages, $formName, $pid] = $this->countPagesFromDB($survey_hash);
+            if ($totalPages <= 3 || !$formName) return;
+            if (!$this->isFormConfigured($formName)) return;
+
+            $order = $this->makeOrder($totalPages);
+            $_SESSION[$sk] = [
                 'order'       => $order,
                 'total_pages' => $totalPages,
+                'form_name'   => $formName,
             ];
+        }
 
-            // Persist to a REDCap field if configured
-            if (!empty($config['order_field']) && !empty($record)) {
-                REDCap::saveData(
-                    (int)$project_id,
-                    'array',
-                    [$record => [$event_id => [$config['order_field'] => implode(',', $order)]]],
-                    'overwrite'
-                );
+        $order = $_SESSION[$sk]['order'];
+        $total = $_SESSION[$sk]['total_pages'];
+        [$v2r, $r2v] = $this->maps($order);
+
+        $curReal    = max(1, (int)($_GET['__page__'] ?? 1));
+        $curVirtual = $r2v[$curReal] ?? 1;
+
+        /* Save order to field once */
+        if (!isset($_SESSION[$sk]['saved']) && !empty($record)) {
+            $of = $this->getOrderField($instrument);
+            if ($of) {
+                REDCap::saveData($project_id, 'array',
+                    [$record => [$event_id => [$of => implode(',', $order)]]],
+                    'overwrite');
             }
+            $_SESSION[$sk]['saved'] = true;
         }
 
-        $order = $_SESSION[$sessionKey]['order']; // e.g. [3, 1, 2, 4]
-
-        // ---- Build virtual ↔ real maps ----
-        $virtualToReal = []; // virtual page (1-based) => real page
-        $realToVirtual = []; // real page => virtual page (1-based)
-        foreach ($order as $vIdx => $realPage) {
-            $vPage                   = $vIdx + 1;
-            $virtualToReal[$vPage]   = (int)$realPage;
-            $realToVirtual[(int)$realPage] = $vPage;
-        }
-
-        $currentVirtualPage = $realToVirtual[$currentRealPage] ?? 1;
-
-        // The real page we should navigate TO on Next / Back
-        $nextVP       = $currentVirtualPage + 1;
-        $prevVP       = $currentVirtualPage - 1;
-        $nextRealPage = isset($virtualToReal[$nextVP])
-            ? $virtualToReal[$nextVP]
-            : ($totalPages + 1); // signals survey completion to REDCap
-        $prevRealPage = ($prevVP >= 1 && isset($virtualToReal[$prevVP]))
-            ? $virtualToReal[$prevVP]
-            : 1;
-
-        // ---- Pre-compute page hashes for every real page ----
-        // REDCap verifies __page_hash__ == Survey::getPageNumHash(__page__) on POST.
-        // Because the hash uses server-side salts we cannot recompute it in JS,
-        // so we compute all hashes here and pass them to the client.
+        /*
+         * Precompute page hashes for every possible __page__ value we might
+         * POST.  The range of "fake" page values is 0 … total+1 because
+         * REDCap does ±1 on the posted value to get the target page.
+         */
         $pageHashes = [];
-        for ($p = 1; $p <= ($totalPages + 1); $p++) {
+        for ($p = 0; $p <= $total + 1; $p++) {
             $pageHashes[$p] = \Survey::getPageNumHash($p);
         }
 
-        // ---- Inject JS ----
-        $jsData = [
-            'totalPages'         => $totalPages,
-            'currentRealPage'    => $currentRealPage,
-            'currentVirtualPage' => $currentVirtualPage,
-            'nextRealPage'       => $nextRealPage,
-            'prevRealPage'       => $prevRealPage,
-            'order'              => $order,
-            'virtualToReal'      => $virtualToReal,
-            'realToVirtual'      => $realToVirtual,
-            'pageHashes'         => $pageHashes,
-        ];
-
-        echo $this->initializeJavascriptModuleObject();
+        $v2rJson    = json_encode($v2r);
+        $r2vJson    = json_encode($r2v);
+        $hashesJson = json_encode($pageHashes);
         ?>
         <script>
-        (function () {
-            var SPS = <?= $this->getJavascriptModuleObjectName() ?>;
-            SPS.shuffleData = <?= json_encode($jsData, JSON_UNESCAPED_UNICODE) ?>;
-        })();
+        $(function(){
+            var v2r    = <?=$v2rJson?>,
+                r2v    = <?=$r2vJson?>,
+                hashes = <?=$hashesJson?>,
+                total  = <?=(int)$total?>,
+                curR   = <?=(int)$curReal?>,
+                curV   = <?=(int)$curVirtual?>;
+
+            /* --- Fix page counter display --- */
+            var el = document.getElementById('surveypagenum') || document.getElementById('pagecounter');
+            if (el) el.innerHTML = el.innerHTML.replace(/\d+(\s*(?:of|\/)\s*)\d+/i, curV + '$1' + total);
+
+            /* --- Intercept form submission to rewrite __page__ --- */
+            var form = document.getElementById('form');
+            if (!form) return;
+
+            var pageField = form.querySelector('input[name="__page__"]');
+            var hashField = form.querySelector('input[name="__page_hash__"]');
+            if (!pageField || !hashField) return;
+
+            /* Override dataEntrySubmit to rewrite page before REDCap processes */
+            var origSubmit = window.dataEntrySubmit;
+            window.dataEntrySubmit = function(ob) {
+                var action = (ob && ob.name) ? ob.name : '';
+
+                if (action === 'submit-btn-saveprevpage') {
+                    /* Going back: REDCap will do posted_page - 1 to get target */
+                    var prevV = curV - 1;
+                    if (prevV >= 1) {
+                        var targetR = v2r[String(prevV)];
+                        /* Need: posted - 1 = targetR  →  posted = targetR + 1 */
+                        var newPage = targetR + 1;
+                        pageField.value = newPage;
+                        hashField.value = hashes[String(newPage)] || '';
+                    }
+                    return origSubmit(ob);
+                }
+
+                if (action === 'submit-btn-saverecord') {
+                    var nextV = curV + 1;
+                    if (nextV <= total) {
+                        var targetR = v2r[String(nextV)];
+                        /* Need: posted + 1 = targetR  →  posted = targetR - 1 */
+                        var newPage = targetR - 1;
+                        pageField.value = newPage;
+                        hashField.value = hashes[String(newPage)] || '';
+                    }
+                    /* If nextV > total → last page, normal submit, no rewrite */
+                    return origSubmit(ob);
+                }
+
+                /* Any other button (save & return later, etc.) — pass through */
+                return origSubmit(ob);
+            };
+        });
         </script>
         <?php
-        echo '<script src="' . $this->getUrl('assets/shuffle.js', true) . '"></script>';
     }
-
-    // -------------------------------------------------------------------------
-    // AJAX handler
-    // -------------------------------------------------------------------------
-    public function redcap_module_ajax(
-        $action, $payload, $project_id, $record, $instrument, $event_id,
-        $repeat_instance, $survey_hash, $response_id, $survey_queue_hash,
-        $page, $page_full, $user_id, $group_id
-    ) {
-        switch ($action) {
-            case 'getShuffleOrder':
-                $key  = $this->sessionKey((int)$project_id, (string)$survey_hash);
-                $data = $_SESSION[$key] ?? null;
-                return ['success' => !empty($data), 'data' => $data];
-
-            default:
-                throw new \Exception("Action '$action' is not defined.");
-        }
-    }
-
 }
