@@ -8,7 +8,11 @@
  * Navigation uses a VISITED SET + position pointer instead of a mutable stack,
  * making it impossible to get stuck in a loop.
  *
- * Session key: spc_{record}_{instrument}_{event_id}  (unique per respondent)
+ * Session key: spc_{instrument}_{event_id}
+ * $_SESSION is already scoped per PHP session (per respondent browser session),
+ * so no record ID or hash is needed in the key — instrument+event_id is enough
+ * to distinguish concurrent surveys. This also means the key is stable on
+ * page 1 before REDCap assigns the record ID.
  *
  * @author Ihab Zeedia <ihab.zeedia@stanford.edu>
  */
@@ -22,9 +26,12 @@ class SurveyPagesShuffle extends AbstractExternalModule
 {
     // ── Session key ────────────────────────────────────────────────────────
 
-    private function skey($record, $instrument, $eventId): string
+    private function skey(string $instrument, int $eventId): string
     {
-        return "spc_{$record}_{$instrument}_{$eventId}";
+        // $_SESSION is per PHP session (per respondent), so instrument+event_id
+        // is sufficient to be unique within a session and is available on page 1
+        // before REDCap assigns the record ID.
+        return "spc_{$instrument}_{$eventId}";
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────
@@ -152,7 +159,7 @@ class SurveyPagesShuffle extends AbstractExternalModule
     ): void {
         if (empty($hash)) return;
 
-        $sk = $this->skey($record, $instrument, $eventId);
+        $sk = $this->skey($instrument, $eventId);
 
         // ── Initialise on first visit ──────────────────────────────────────
         if (!isset($_SESSION[$sk])) {

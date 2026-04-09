@@ -83,12 +83,15 @@ Configure**. Add one row per instrument you want to shuffle:
 
 ### Server-side session
 The shuffled order is stored in `$_SESSION` under the key
-`spc_{record}_{instrument}_{event_id}` (unique per respondent response). Using the recordId, instrument, event ID — rather
-than the record ID — allows the session to be created on **page 1**, before
-REDCap assigns the record ID (which only happens after the first form
-submission). The session is reused for all subsequent pages of the same
-response. It also tracks a **visited set** of real page numbers so the module
-knows which middle pages have already been seen.
+`spc_{instrument}_{event_id}`. Because PHP's `$_SESSION` is already scoped to
+the respondent's browser session, no record ID or hash is needed in the key —
+`instrument + event_id` is enough to distinguish between different surveys in
+the same session. Crucially, this key is **stable on page 1** (before REDCap
+assigns the record ID, which only happens after the first form submission),
+preventing page 1 from being omitted from the visited set and subsequently
+shown again as a redirect target. The session is reused for all subsequent
+pages of the same response. It also tracks a **visited set** of real page
+numbers so the module knows which middle pages have already been seen.
 
 ### Hook 1 — `redcap_every_page_before_render`
 Fires before REDCap processes the posted page number. It reads the
