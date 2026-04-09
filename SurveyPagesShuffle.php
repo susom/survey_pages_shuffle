@@ -22,7 +22,7 @@ class SurveyPagesShuffle extends AbstractExternalModule
 {
     // ── Session key ────────────────────────────────────────────────────────
 
-    private function skey($record, string $instrument, int $eventId): string
+    private function skey($record, $instrument, $eventId): string
     {
         return "spc_{$record}_{$instrument}_{$eventId}";
     }
@@ -150,7 +150,7 @@ class SurveyPagesShuffle extends AbstractExternalModule
         int $pid, $record, string $instrument,
         int $eventId, string $hash
     ): void {
-        if (empty($hash) || empty($record)) return;
+        if (empty($hash)) return;
 
         $sk = $this->skey($record, $instrument, $eventId);
 
@@ -194,8 +194,9 @@ class SurveyPagesShuffle extends AbstractExternalModule
         $lastRealPage = $order[$total - 1];   // always = $total (pinned last)
         $remaining    = array_values(array_diff($order, $visited, [$lastRealPage]));
 
-        // Save order to optional field once
-        if (!isset($data['saved'])) {
+        // Save order to optional field once — record is empty on page 1 (before
+        // REDCap creates it), so defer until the record ID is available.
+        if (!isset($data['saved']) && !empty($record)) {
             $of = $this->orderField($instrument);
             if ($of) {
                 REDCap::saveData($pid, 'array',
@@ -270,15 +271,19 @@ class SurveyPagesShuffle extends AbstractExternalModule
                 } else if (action === 'submit-btn-saverecord' && curV < total) {
                     // Next: next virtual page
                     var nextV = curV + 1;
+                    var nextR = v2r[String(nextV)];
 
-                    // If we would jump to the last page but unvisited MIDDLE
-                    // pages still remain, redirect to the first unvisited middle
-                    // page instead of going to the last page.
-                    if (nextV === total && remaining.length > 0) {
-                        console.log('[SPS] Middle pages still unvisited; redirecting to real page ' + remaining[0] + ' instead of last page.');
+                    // If unvisited middle pages remain AND the next natural page
+                    // is not one of them (it is either the last page or an
+                    // already-visited middle page), redirect to the first
+                    // unvisited middle page instead.  This prevents both
+                    // re-visiting already-seen pages after back-navigation AND
+                    // skipping straight to the last page.
+                    if (remaining.length > 0 && remaining.indexOf(nextR) === -1) {
+                        console.log('[SPS] Next page (real=' + nextR + ') already visited or is last; redirecting to first unvisited real page ' + remaining[0] + '.');
                         targetR = remaining[0];
                     } else {
-                        targetR = v2r[String(nextV)];
+                        targetR = nextR;
                     }
                 }
 
