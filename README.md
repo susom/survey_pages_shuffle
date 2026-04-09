@@ -109,8 +109,9 @@ and injects inline JavaScript:
 * Before the form posts, it sets a hidden `__sps_target__` field to the
   desired real page number. It also rewrites `input[name="__page__"]` and
   `input[name="__page_hash__"]` as a fallback in case Hook 1 is inactive.
-* **Guards** against skipping to the last page while unvisited middle pages
-  still remain — the submission is aborted until all middle pages are visited.
+* **Redirects to unvisited middle pages** if the respondent would otherwise
+  jump straight to the last page — they are automatically routed to the first
+  remaining unvisited middle page instead.
 
 ### Page counter
 The visible "Page X of Y" element (`surveypagenum` / `pagecounter`) is

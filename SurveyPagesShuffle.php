@@ -188,9 +188,9 @@ class SurveyPagesShuffle extends AbstractExternalModule
         $foundAt    = array_search($curReal, $order, true);
         $curVirtual = ($foundAt !== false) ? (int)$foundAt + 1 : 1;
 
-        // Pages still unvisited — used by JS to check if middle pages remain.
-        // Exclude the last real page: it's always unvisited until the very end,
-        // so including it would permanently block navigation to it.
+        // Pages still unvisited — used by JS to redirect to an unvisited middle
+        // page if the respondent tries to jump straight to the last page.
+        // Exclude the last real page itself (always unvisited until the very end).
         $lastRealPage = $order[$total - 1];   // always = $total (pinned last)
         $remaining    = array_values(array_diff($order, $visited, [$lastRealPage]));
 
@@ -271,16 +271,15 @@ class SurveyPagesShuffle extends AbstractExternalModule
                     // Next: next virtual page
                     var nextV = curV + 1;
 
-                    // Block advancing to the last page while unvisited MIDDLE
-                    // pages still remain. remaining[] excludes the last page
-                    // itself, so remaining.length > 0 means middle pages are
-                    // still pending.
+                    // If we would jump to the last page but unvisited MIDDLE
+                    // pages still remain, redirect to the first unvisited middle
+                    // page instead of going to the last page.
                     if (nextV === total && remaining.length > 0) {
-                        console.warn('[SPS] Cannot go to last page yet. Middle pages remaining:', remaining);
-                        return false;   // abort submission; do not advance
+                        console.log('[SPS] Middle pages still unvisited; redirecting to real page ' + remaining[0] + ' instead of last page.');
+                        targetR = remaining[0];
+                    } else {
+                        targetR = v2r[String(nextV)];
                     }
-
-                    targetR = v2r[String(nextV)];
                 }
 
                 if (targetR > 0) {
