@@ -83,20 +83,34 @@ Configure**. Add one row per instrument you want to shuffle:
 
 ### Server-side session
 The shuffled order is stored in `$_SESSION` under the key
-`survey_pages_shuffle_{hash}`. It is created on the first page load and
-reused for all subsequent pages of the same response.
+`spc_{record}_{instrument}_{event_id}` (unique per respondent/instrument/event
+combination). It is created on the first page load and reused for all
+subsequent pages of the same response. The session also tracks a **visited
+set** of real page numbers so the module knows which middle pages have already
+been seen.
 
-### JavaScript interception
-Inline JavaScript is injected on every survey page for a configured
-instrument via the `redcap_survey_page_top` hook. It:
+### Hook 1 — `redcap_every_page_before_render`
+Fires before REDCap processes the posted page number. It reads the
+`__sps_target__` field set by the JS and rewrites `$_POST['__page__']` to the
+sentinel value `99999` (which does not appear in `$pageFields`). This causes
+REDCap's `setPageNum()` to leave `$_GET['__page__']` (already set to the real
+target) unchanged, and bypasses the data-save field-filter so **all** posted
+fields are saved regardless of which real page they belong to.
 
-* Reads the virtual-to-real page mapping and precomputed page hashes
-  (injected by PHP).
+### Hook 2 — `redcap_survey_page_top`
+Fires after REDCap determines the current page and saves any posted data.
+It manages the visited set, saves the shuffled order to the optional field,
+and injects inline JavaScript:
+
+* Reads the virtual-to-real page mapping, precomputed page hashes, and the
+  set of remaining unvisited middle pages (all injected by PHP).
 * Overrides `window.dataEntrySubmit` to intercept the named submit buttons
   (`submit-btn-saverecord` = Next/Submit, `submit-btn-saveprevpage` = Back).
-* Before the form posts, it rewrites `input[name="__page__"]` and
-  `input[name="__page_hash__"]` with the correct values so REDCap navigates
-  to the intended shuffled page.
+* Before the form posts, it sets a hidden `__sps_target__` field to the
+  desired real page number. It also rewrites `input[name="__page__"]` and
+  `input[name="__page_hash__"]` as a fallback in case Hook 1 is inactive.
+* **Guards** against skipping to the last page while unvisited middle pages
+  still remain — the submission is aborted until all middle pages are visited.
 
 ### Page counter
 The visible "Page X of Y" element (`surveypagenum` / `pagecounter`) is

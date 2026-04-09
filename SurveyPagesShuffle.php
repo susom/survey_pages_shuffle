@@ -3,11 +3,12 @@
  * Survey Pages Shuffle — REDCap External Module
  *
  * Randomizes page order within a single multi-page survey.
- * Pages are defined by Section Headers in the Online Designer.
+ * Pages 1 and N are pinned. Only pages 2…N-1 are shuffled.
  *
- * First page and last page are ALWAYS kept in place (page 1 stays first,
- * page N stays last).  Only pages 2 … N-1 are shuffled.  This guarantees
- * that REDCap's native Submit button on the last page works normally.
+ * Navigation uses a VISITED SET + position pointer instead of a mutable stack,
+ * making it impossible to get stuck in a loop.
+ *
+ * Session key: spc_{record}_{instrument}_{event_id}  (unique per respondent)
  *
  * @author Ihab Zeedia <ihab.zeedia@stanford.edu>
  */
@@ -19,25 +20,25 @@ use REDCap;
 
 class SurveyPagesShuffle extends AbstractExternalModule
 {
-    /* ---------- helpers ---------- */
+    // ── Session key ────────────────────────────────────────────────────────
 
-    private function skey(string $hash): string
+    private function skey($record, string $instrument, int $eventId): string
     {
-        return "survey_pages_shuffle_{$hash}";
+        return "spc_{$record}_{$instrument}_{$eventId}";
     }
 
-    /**
-     * Look up total page count, form name and project id from the survey hash.
-     */
-    private function countPagesFromDB(string $surveyHash): array
+    // ── Helpers ────────────────────────────────────────────────────────────
+
+    /** Returns [$pageCount, $formName, $projectId] from the survey hash. */
+    private function countPages(string $surveyHash): array
     {
-        $sql = "SELECT s.project_id, s.form_name, s.question_by_section
-                FROM redcap_surveys s
-                JOIN redcap_surveys_participants p ON s.survey_id = p.survey_id
-                WHERE p.hash = '" . db_escape($surveyHash) . "'
-                  AND p.event_id IS NOT NULL
-                LIMIT 1";
-        $q = db_query($sql);
+        $q = db_query(
+            "SELECT s.project_id, s.form_name, s.question_by_section
+             FROM redcap_surveys s
+             JOIN redcap_surveys_participants p ON s.survey_id = p.survey_id
+             WHERE p.hash = '" . db_escape($surveyHash) . "'
+             LIMIT 1"
+        );
         if (!$q || db_num_rows($q) === 0) return [0, null, null];
         $row = db_fetch_assoc($q);
 
@@ -46,7 +47,8 @@ class SurveyPagesShuffle extends AbstractExternalModule
         if (!(int)$row['question_by_section']) return [1, $form, $pid];
 
         $pk = db_result(db_query(
-            "SELECT field_name FROM redcap_metadata WHERE project_id = $pid ORDER BY field_order LIMIT 1"
+            "SELECT field_name FROM redcap_metadata
+             WHERE project_id = $pid ORDER BY field_order LIMIT 1"
         ), 0);
 
         $q2 = db_query(
@@ -66,28 +68,26 @@ class SurveyPagesShuffle extends AbstractExternalModule
         return [$pages, $form, $pid];
     }
 
-    private function isFormConfigured(string $form): bool
+    private function isConfigured(string $form): bool
     {
         return in_array($form, $this->getProjectSetting('instrument') ?? [], true);
     }
 
-    private function getOrderField(string $form): ?string
+    private function orderField(string $form): ?string
     {
         $instruments = $this->getProjectSetting('instrument')       ?? [];
-        $oF          = $this->getProjectSetting('page-order-field') ?? [];
+        $fields      = $this->getProjectSetting('page-order-field') ?? [];
         foreach ($instruments as $i => $inst) {
-            if ($inst === $form) return $oF[$i] ?? null;
+            if ($inst === $form) return $fields[$i] ?? null;
         }
         return null;
     }
 
     /**
-     * Build the shuffled page order.
-     * Page 1 is always first, page N is always last.
-     * Only pages 2 … N-1 are shuffled.
-     * Needs at least 4 pages to actually shuffle anything.
+     * Build shuffled order. Page 1 always first, page N always last.
+     * Returns e.g. [1, 4, 2, 3, 5] for a 5-page survey.
      */
-    private function makeOrder(int $total): array
+    private function buildOrder(int $total): array
     {
         if ($total <= 3) return range(1, $total);
         $mid = range(2, $total - 1);
@@ -95,175 +95,217 @@ class SurveyPagesShuffle extends AbstractExternalModule
         return array_merge([1], $mid, [$total]);
     }
 
-    /**
-     * Return two maps:
-     *   $v2r  virtual-position → real-page
-     *   $r2v  real-page → virtual-position
-     */
-    private function maps(array $order): array
-    {
-        $v2r = $r2v = [];
-        foreach ($order as $vi => $rp) {
-            $v2r[$vi + 1]  = (int)$rp;
-            $r2v[(int)$rp] = $vi + 1;
-        }
-        return [$v2r, $r2v];
-    }
+    // ── HOOK 1 — redcap_every_page_before_render ──────────────────────────
+    //
+    // Fires BEFORE initPageNumCheck() and setPageNum().
+    // Reads __sps_target__ posted by our JS and:
+    //   • Sets $_GET['__page__'] = target  (page REDCap will render)
+    //   • Sets $_POST['__page__'] = 99999  (sentinel not in $pageFields)
+    //       → setPageNum() skips its ±1 block
+    //       → data-save field-filter skips stripping  → ALL fields saved
 
-    /* ================================================================ */
-    /*  HOOK 1 — redcap_every_page_before_render                       */
-    /*                                                                  */
-    /*  Runs BEFORE initPageNumCheck() and setPageNum().                */
-    /*  On POST we read __sps_target__ (injected by our JS) and        */
-    /*  rewrite $_POST['__page__'] to a value that will NOT match any   */
-    /*  real page, causing setPageNum() to skip its ±1 logic.  We also */
-    /*  pre-set $_GET['__page__'] to the desired target page, which    */
-    /*  setPageNum() will leave untouched.                             */
-    /*                                                                  */
-    /*  Because $_POST['__page__'] does not match $pageFields[X],      */
-    /*  REDCap's data-save filter (which strips fields not on the      */
-    /*  "current" page) is also bypassed, so ALL field data is saved.  */
-    /* ================================================================ */
     public function redcap_every_page_before_render($project_id)
     {
         try {
-            // Only act on survey pages with a valid project context
-            if (empty($project_id))          return;
-            if (empty($_GET['s']))           return;
-            if ($_SERVER['REQUEST_METHOD'] !== 'POST') return;
-            if (!isset($_POST['__sps_target__']))      return;
+            if (empty($project_id))                               return;
+            if (!defined('PAGE') || PAGE !== 'surveys/index.php') return;
+            if (empty($_GET['s']))                                 return;
+            if ($_SERVER['REQUEST_METHOD'] !== 'POST')            return;
+            if (!isset($_POST['__sps_target__']))                 return;
+            if (!class_exists('Survey'))                          return;
 
             $target = (int)$_POST['__sps_target__'];
             if ($target < 1) return;
 
-            // Set the page REDCap will render
-            $_GET['__page__'] = $target;
-
-            // Make __page__ a value that does NOT exist in $pageFields
-            // so setPageNum() skips its ±1 block and the data-save
-            // filter doesn't strip any fields.
-            $fakePageNum = 99999;
-            $_POST['__page__']      = (string)$fakePageNum;
-            $_POST['__page_hash__'] = \Survey::getPageNumHash($fakePageNum);
-
-            // Clean up our custom field
+            $_GET['__page__']       = $target;
+            $_POST['__page__']      = '99999';
+            $_POST['__page_hash__'] = \Survey::getPageNumHash(99999);
             unset($_POST['__sps_target__']);
+
         } catch (\Throwable $e) {
-            error_log("SPS ERROR in before_render: " . $e->getMessage());
+            error_log("[SPS] before_render: " . $e->getMessage());
         }
     }
 
-    /* ================================================================ */
-    /*  HOOK 2 — redcap_survey_page_top                                */
-    /*                                                                  */
-    /*  Runs AFTER the page has been determined and data saved.         */
-    /*  Initialises the shuffle order on first visit, saves order to    */
-    /*  a field, injects the JS that intercepts Next/Back buttons.     */
-    /* ================================================================ */
+    // ── HOOK 2 — redcap_survey_page_top ───────────────────────────────────
+    //
+    // Fires AFTER page determination + data save.
+    // Manages the visited-set and injects JS.
+
     public function redcap_survey_page_top(
         $project_id, $record, $instrument, $event_id,
         $group_id, $survey_hash, $response_id, $repeat_instance
     ) {
         try {
-            $this->handleSurveyPageTop(
+            $this->onPageTop(
                 (int)$project_id, $record, (string)$instrument,
                 (int)$event_id, (string)$survey_hash
             );
         } catch (\Throwable $e) {
-            error_log("SPS ERROR: " . $e->getMessage());
+            error_log("[SPS] page_top: " . $e->getMessage());
         }
     }
 
-    private function handleSurveyPageTop(
-        int $project_id, $record, string $instrument,
-        int $event_id, string $survey_hash
+    private function onPageTop(
+        int $pid, $record, string $instrument,
+        int $eventId, string $hash
     ): void {
-        if (empty($survey_hash)) return;
+        if (empty($hash) || empty($record)) return;
 
-        $sk = $this->skey($survey_hash);
+        $sk = $this->skey($record, $instrument, $eventId);
 
-        /* --- Initialise the shuffle on first visit --- */
+        // ── Initialise on first visit ──────────────────────────────────────
         if (!isset($_SESSION[$sk])) {
-            [$totalPages, $formName, $pid] = $this->countPagesFromDB($survey_hash);
-            if ($totalPages <= 3 || !$formName) return;
-            if (!$this->isFormConfigured($formName)) return;
+            [$total, $form] = $this->countPages($hash);
+            if ($total <= 3 || !$form)      return;
+            if (!$this->isConfigured($form)) return;
 
-            $order = $this->makeOrder($totalPages);
+            $order = $this->buildOrder($total);
             $_SESSION[$sk] = [
-                'order'       => $order,
-                'total_pages' => $totalPages,
-                'form_name'   => $formName,
+                'order'   => $order,   // [real_page, ...] in shuffled sequence
+                'visited' => [],       // set of real pages already shown
+                'total'   => $total,
+                'form'    => $form,
             ];
         }
 
-        $order = $_SESSION[$sk]['order'];
-        $total = $_SESSION[$sk]['total_pages'];
-        [$v2r, $r2v] = $this->maps($order);
+        $data    = &$_SESSION[$sk];
+        $order   = $data['order'];   // e.g. [1, 4, 2, 3, 5]
+        $total   = $data['total'];
+        $visited = &$data['visited'];
 
-        $curReal    = max(1, (int)($_GET['__page__'] ?? 1));
-        $curVirtual = $r2v[$curReal] ?? 1;
+        // Current real page REDCap rendered
+        $curReal = max(1, (int)($_GET['__page__'] ?? 1));
 
-        /* Save order to field once */
-        if (!isset($_SESSION[$sk]['saved']) && !empty($record)) {
-            $of = $this->getOrderField($instrument);
-            if ($of) {
-                REDCap::saveData($project_id, 'array',
-                    [$record => [$event_id => [$of => implode(',', $order)]]],
-                    'overwrite');
-            }
-            $_SESSION[$sk]['saved'] = true;
+        // Mark current page as visited
+        if (!in_array($curReal, $visited, true)) {
+            $visited[] = $curReal;
         }
 
-        /* Pass mapping to JavaScript */
-        $v2rJson = json_encode($v2r);
-        $r2vJson = json_encode($r2v);
+        // Virtual position = 1-based index of curReal in the order array.
+        // array_search must be checked for false BEFORE casting to int,
+        // because (int)false === 0 which would corrupt the position.
+        $foundAt    = array_search($curReal, $order, true);
+        $curVirtual = ($foundAt !== false) ? (int)$foundAt + 1 : 1;
+
+        // Pages still unvisited — used by JS to check if middle pages remain.
+        // Exclude the last real page: it's always unvisited until the very end,
+        // so including it would permanently block navigation to it.
+        $lastRealPage = $order[$total - 1];   // always = $total (pinned last)
+        $remaining    = array_values(array_diff($order, $visited, [$lastRealPage]));
+
+        // Save order to optional field once
+        if (!isset($data['saved'])) {
+            $of = $this->orderField($instrument);
+            if ($of) {
+                REDCap::saveData($pid, 'array',
+                    [$record => [$eventId => [$of => implode(',', $order)]]],
+                    'overwrite');
+            }
+            $data['saved'] = true;
+        }
+
+        // Precompute page hashes the JS needs (real pages + sentinel 99999)
+        $hashes = [];
+        for ($p = 0; $p <= $total + 1; $p++) {
+            $hashes[$p] = \Survey::getPageNumHash($p);
+        }
+        $hashes[99999] = \Survey::getPageNumHash(99999);
+
+        // Build virtual→real map for JS navigation
+        $v2r = [];
+        foreach ($order as $vi => $rp) {
+            $v2r[$vi + 1] = (int)$rp;
+        }
+
+        $v2rJson       = json_encode($v2r);
+        $hashesJson    = json_encode($hashes);
+        $remainingJson = json_encode($remaining);
         ?>
         <script>
-        $(function(){
-            var v2r   = <?=$v2rJson?>,
-                r2v   = <?=$r2vJson?>,
-                total = <?=(int)$total?>,
-                curR  = <?=(int)$curReal?>,
-                curV  = <?=(int)$curVirtual?>;
+        $(function () {
+            var v2r       = <?= $v2rJson ?>,
+                hashes    = <?= $hashesJson ?>,
+                remaining = <?= $remainingJson ?>,
+                total     = <?= (int)$total ?>,
+                curR      = <?= (int)$curReal ?>,
+                curV      = <?= (int)$curVirtual ?>;
 
-            /* --- Fix page counter display --- */
-            var el = document.getElementById('surveypagenum') || document.getElementById('pagecounter');
-            if (el) el.innerHTML = el.innerHTML.replace(/\d+(\s*(?:of|\/)\s*)\d+/i, curV + '$1' + total);
+            console.log('[SPS] real=' + curR + ' virtual=' + curV + '/' + total
+                + '  order='     + JSON.stringify(v2r)
+                + '  remaining=' + JSON.stringify(remaining));
 
-            /* --- Add hidden field for our target page --- */
+            // Fix page counter display
+            var pgEl = document.getElementById('surveypagenum')
+                     || document.getElementById('pagecounter');
+            if (pgEl) {
+                pgEl.innerHTML = pgEl.innerHTML
+                    .replace(/\d+(\s*(?:of|\/)\s*)\d+/i, curV + '$1' + total);
+            }
+
             var form = document.getElementById('form');
             if (!form) return;
 
+            // Hidden field carrying the desired target page to the server
             var spsField = document.createElement('input');
             spsField.type  = 'hidden';
             spsField.name  = '__sps_target__';
             spsField.value = '';
             form.appendChild(spsField);
 
-            /* Override dataEntrySubmit to set the target page before submission */
-            var origSubmit = window.dataEntrySubmit;
-            window.dataEntrySubmit = function(ob) {
-                var action = (ob && ob.name) ? ob.name : '';
+            var pageField = form.querySelector('input[name="__page__"]');
+            var hashField = form.querySelector('input[name="__page_hash__"]');
+
+            var _orig = window.dataEntrySubmit;
+            window.dataEntrySubmit = function (ob) {
+                var action  = (ob && ob.name) ? ob.name : '';
+                var targetR = 0;
 
                 if (action === 'submit-btn-saveprevpage') {
-                    var prevV = curV - 1;
-                    if (prevV >= 1) {
-                        spsField.value = v2r[String(prevV)];
+                    // Back: previous virtual page
+                    if (curV > 1) {
+                        targetR = v2r[String(curV - 1)];
                     }
-                    return origSubmit(ob);
-                }
 
-                if (action === 'submit-btn-saverecord') {
+                } else if (action === 'submit-btn-saverecord' && curV < total) {
+                    // Next: next virtual page
                     var nextV = curV + 1;
-                    if (nextV <= total) {
-                        spsField.value = v2r[String(nextV)];
+
+                    // Block advancing to the last page while unvisited MIDDLE
+                    // pages still remain. remaining[] excludes the last page
+                    // itself, so remaining.length > 0 means middle pages are
+                    // still pending.
+                    if (nextV === total && remaining.length > 0) {
+                        console.warn('[SPS] Cannot go to last page yet. Middle pages remaining:', remaining);
+                        return false;   // abort submission; do not advance
                     }
-                    /* nextV > total → last page, normal submit, spsField stays empty */
-                    return origSubmit(ob);
+
+                    targetR = v2r[String(nextV)];
                 }
 
-                /* Any other button — pass through */
-                return origSubmit(ob);
+                if (targetR > 0) {
+                    spsField.value = String(targetR);
+                    // Set __page__ to the target page with its real hash.
+                    // Hook 1 (redcap_every_page_before_render) will replace this
+                    // with the 99999 sentinel server-side, which bypasses
+                    // setPageNum()'s ±1 and the data-save field filter.
+                    // If Hook 1 is not active, REDCap will still navigate to
+                    // targetR via normal ±1 math (targetR-1 for next, targetR+1
+                    // for prev), so we post targetR∓1 as a safe fallback.
+                    if (pageField && hashField) {
+                        var postPage;
+                        if (action === 'submit-btn-saveprevpage') {
+                            postPage = targetR + 1;  // REDCap does posted-1 for prev
+                        } else {
+                            postPage = targetR - 1;  // REDCap does posted+1 for next
+                        }
+                        pageField.value = String(postPage);
+                        hashField.value = hashes[String(postPage)] || '';
+                    }
+                    console.log('[SPS] → navigating to real page ' + targetR);
+                }
+
+                return _orig(ob);
             };
         });
         </script>
