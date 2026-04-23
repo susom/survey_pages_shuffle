@@ -161,7 +161,36 @@ class SurveyPagesShuffle extends AbstractExternalModule
 
         $sk = $this->skey($instrument, $eventId);
 
-        // ── Initialise on first visit ──────────────────────────────────────
+        // Current real page REDCap is rendering.
+        // Must be read before the session checks below.
+        $curReal = max(1, (int)($_GET['__page__'] ?? 1));
+
+        // ── Detect new survey attempt ──────────────────────────────────────
+        //
+        // Every new attempt begins with a GET request to page 1:
+        //   • The participant clicked the survey link afresh, OR
+        //   • Their data was cleared and they were sent the link again.
+        //
+        // Back-navigation to page 1 always arrives as a POST (the survey
+        // form submits). REDCap resume-to-a-middle-page arrives as a GET
+        // but with curReal > 1. So the triple condition below is specific
+        // to "brand-new page-1 visit on an existing session" and nothing
+        // else — no response_id comparison needed.
+        //
+        // NOTE: response_id is intentionally NOT used here. REDCap creates a
+        // new response row on every page POST within the same attempt, so the
+        // hook parameter changes mid-survey (e.g. 5 → 6) and cannot reliably
+        // distinguish a new attempt from normal navigation.
+        //
+        if (
+            isset($_SESSION[$sk])
+            && $curReal === 1
+            && ($_SERVER['REQUEST_METHOD'] ?? '') === 'GET'
+        ) {
+            unset($_SESSION[$sk]);
+        }
+
+        // ── Initialise session (first visit, or after reset above) ─────────
         if (!isset($_SESSION[$sk])) {
             [$total, $form] = $this->countPages($hash);
             if ($total <= 3 || !$form)      return;
@@ -181,9 +210,6 @@ class SurveyPagesShuffle extends AbstractExternalModule
         $total   = $data['total'];
         $visited = &$data['visited'];
 
-        // Current real page REDCap rendered
-        $curReal = max(1, (int)($_GET['__page__'] ?? 1));
-
         // Mark current page as visited
         if (!in_array($curReal, $visited, true)) {
             $visited[] = $curReal;
@@ -201,16 +227,22 @@ class SurveyPagesShuffle extends AbstractExternalModule
         $lastRealPage = $order[$total - 1];   // always = $total (pinned last)
         $remaining    = array_values(array_diff($order, $visited, [$lastRealPage]));
 
-        // Save order to optional field once — record is empty on page 1 (before
-        // REDCap creates it), so defer until the record ID is available.
-        if (!isset($data['saved']) && !empty($record)) {
+        // Save order to optional field on every page once the record exists.
+        // The record is empty on page 1 (before REDCap creates it), so the
+        // write is naturally skipped there and succeeds from page 2 onward.
+        //
+        // We intentionally do NOT use a one-shot 'saved' flag here. The flag
+        // would persist in the PHP session across a close-and-return, leaving
+        // the field empty/stale if REDCap cleared it (admin reset, re-attempt,
+        // or a page-save overwrite). Since the order is constant within a
+        // session, writing it on every page is safe and idempotent.
+        if (!empty($record)) {
             $of = $this->orderField($instrument);
             if ($of) {
                 REDCap::saveData($pid, 'array',
                     [$record => [$eventId => [$of => implode(',', $order)]]],
                     'overwrite');
             }
-            $data['saved'] = true;
         }
 
         // Precompute page hashes the JS needs (real pages + sentinel 99999)
