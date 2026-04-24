@@ -59,6 +59,53 @@ Configure**. Add one row per instrument you want to shuffle:
 |---|---|
 | **Instrument** | The survey instrument to enable page shuffling for. |
 | **Field to store the shuffled page order** | *Optional.* A text field where the module records the shuffled order as a comma-separated list of real page numbers (e.g. `1,3,4,2,5`). Useful for auditing or replaying a respondent's exact sequence. |
+| **Inject progress bar** | *Optional.* When enabled, the module injects a visual progress bar at the top of each survey page. The progress bar shows the percentage complete based on the virtual page position, ensuring it moves smoothly from 0% to 100%. See [Progress Bar](#progress-bar) for details. |
+
+---
+
+## Progress Bar
+
+When the **Inject progress bar** option is enabled, the module displays a styled progress bar at the top of each survey page:
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│  ████████████████████████████████░░░░░░░░░░░░  67%             │
+└────────────────────────────────────────────────────────────────┘
+```
+
+### Features
+
+- **Accurate progress:** The bar reflects the respondent's position in the shuffled sequence (virtual position), not the original page order.
+- **Smooth progression:** Progress moves continuously from 0% (page 1) to 100% (last page).
+- **Consistent styling:** Uses a neutral gray color scheme that works with most survey themes.
+- **Responsive:** The bar is centered and scales appropriately on different screen sizes.
+
+### Formula
+
+```
+percentage = ((virtualPosition - 1) / (totalPages - 1)) × 100
+```
+
+| Virtual Position | Total Pages | Percentage |
+|---|---|---|
+| 1 | 5 | 0% |
+| 2 | 5 | 25% |
+| 3 | 5 | 50% |
+| 4 | 5 | 75% |
+| 5 | 5 | 100% |
+
+### Customization
+
+The progress bar uses inline styles for maximum compatibility. If you need to customize the appearance (colors, size, etc.), you can add custom CSS in REDCap's survey settings or via the **Survey Theme** feature. Target the `#sps-progress-bar` element:
+
+```css
+#sps-progress-bar table {
+    background-color: #d0d0d0 !important;  /* Empty portion */
+}
+#sps-progress-bar td:first-child {
+    background-color: #4CAF50 !important;  /* Filled portion */
+}
+```
 
 ---
 
@@ -163,4 +210,4 @@ field names and their positions in the instrument are unchanged. Only the
 
 | Version | Notes |
 |---|---|
-| 0.0.0 | Initial release. Middle-page shuffling with server-side visited-set tracking. First and last pages are pinned. |
+| 0.0.0 | Initial release. Middle-page shuffling with server-side visited-set tracking. First and last pages are pinned. Added optional progress bar fix for section headers. |

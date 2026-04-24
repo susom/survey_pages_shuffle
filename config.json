@@ -55,6 +55,16 @@
                     "name": "Field to store the shuffled page order (optional, text field)",
                     "type": "field-list",
                     "field-type": "text"
+                },
+                {
+                    "key": "fix-progress-header",
+                    "name": "Inject progress bar",
+                    "type": "checkbox"
+                },
+                {
+                    "key": "fix-progress-note",
+                    "name": "When enabled, the module will inject a visual progress bar at the top of each survey page showing the respondent's progress based on their virtual page position. The progress bar displays the percentage complete and moves continuously from 0% to 100%.",
+                    "type": "descriptive"
                 }
             ]
         }

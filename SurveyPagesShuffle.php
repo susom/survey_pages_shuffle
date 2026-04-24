@@ -90,6 +90,16 @@ class SurveyPagesShuffle extends AbstractExternalModule
         return null;
     }
 
+    private function fixProgressHeader(string $form): bool
+    {
+        $instruments = $this->getProjectSetting('instrument')          ?? [];
+        $flags       = $this->getProjectSetting('fix-progress-header') ?? [];
+        foreach ($instruments as $i => $inst) {
+            if ($inst === $form) return !empty($flags[$i]);
+        }
+        return false;
+    }
+
     /**
      * Build shuffled order. Page 1 always first, page N always last.
      * Returns e.g. [1, 4, 2, 3, 5] for a 5-page survey.
@@ -261,6 +271,7 @@ class SurveyPagesShuffle extends AbstractExternalModule
         $v2rJson       = json_encode($v2r);
         $hashesJson    = json_encode($hashes);
         $remainingJson = json_encode($remaining);
+        $fixProgress   = $this->fixProgressHeader($instrument) ? 'true' : 'false';
         ?>
         <script>
         $(function () {
@@ -269,7 +280,8 @@ class SurveyPagesShuffle extends AbstractExternalModule
                 remaining = <?= $remainingJson ?>,
                 total     = <?= (int)$total ?>,
                 curR      = <?= (int)$curReal ?>,
-                curV      = <?= (int)$curVirtual ?>;
+                curV      = <?= (int)$curVirtual ?>,
+                fixProgress = <?= $fixProgress ?>;
 
             console.log('[SPS] real=' + curR + ' virtual=' + curV + '/' + total
                 + '  order='     + JSON.stringify(v2r)
@@ -281,6 +293,55 @@ class SurveyPagesShuffle extends AbstractExternalModule
             if (pgEl) {
                 pgEl.innerHTML = pgEl.innerHTML
                     .replace(/\d+(\s*(?:of|\/)\s*)\d+/i, curV + '$1' + total);
+            }
+
+            // Inject progress bar if enabled
+            if (fixProgress) {
+                // Calculate the correct percentage based on virtual position
+                // Page 1 = 0%, last page = 100%
+                var pct = Math.round(((curV - 1) / (total - 1)) * 100);
+                var filledWidth = pct;
+                var emptyWidth = 100 - pct;
+
+                // Build the progress bar HTML
+                var progressHtml =
+                    '<div id="sps-progress-bar" style="width: 100%; max-width: 400px; margin: 10px auto 15px auto;">' +
+                        '<table style="background-color: #e0e0e0; border-radius: 15px; border-collapse: separate; width: 100%;" border="0" cellspacing="0" cellpadding="3">' +
+                            '<tbody><tr>';
+
+                if (pct > 0) {
+                    progressHtml +=
+                        '<td style="background-color: #7f7776; height: 25px; border-radius: 12px; text-align: center; color: white; font-weight: bold; font-size: 14px; min-width: 50px;" width="' + filledWidth + '%">' + pct + '%</td>';
+                }
+                if (pct < 100) {
+                    progressHtml +=
+                        '<td style="background-color: transparent;" width="' + emptyWidth + '%">&nbsp;</td>';
+                }
+
+                progressHtml += '</tr></tbody></table></div>';
+
+                // Find the best place to inject the progress bar
+                // Try survey title area first, then form container
+                var surveyTitle = document.getElementById('surveytitlelogo')
+                               || document.getElementById('surveytitle')
+                               || document.querySelector('.surveyTitle');
+                var formContainer = document.getElementById('questiontable')
+                                 || document.getElementById('form');
+
+                var targetEl = surveyTitle || formContainer;
+                if (targetEl) {
+                    // Insert after the survey title, or at the beginning of the form
+                    var progressDiv = document.createElement('div');
+                    progressDiv.innerHTML = progressHtml;
+
+                    if (surveyTitle && surveyTitle.parentNode) {
+                        surveyTitle.parentNode.insertBefore(progressDiv.firstChild, surveyTitle.nextSibling);
+                    } else if (formContainer) {
+                        formContainer.insertBefore(progressDiv.firstChild, formContainer.firstChild);
+                    }
+
+                    console.log('[SPS] Injected progress bar: ' + pct + '% (page ' + curV + '/' + total + ')');
+                }
             }
 
             var form = document.getElementById('form');
