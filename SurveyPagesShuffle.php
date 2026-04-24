@@ -100,6 +100,46 @@ class SurveyPagesShuffle extends AbstractExternalModule
         return false;
     }
 
+    private function progressBarColor(string $form): string
+    {
+        $instruments = $this->getProjectSetting('instrument')          ?? [];
+        $colors      = $this->getProjectSetting('progress-bar-color')  ?? [];
+        foreach ($instruments as $i => $inst) {
+            if ($inst === $form) {
+                $color = $colors[$i] ?? '';
+                // Return the color if set, otherwise default
+                return !empty($color) ? $color : '#7f7776';
+            }
+        }
+        return '#7f7776';
+    }
+
+    private function progressBarBgColor(string $form): string
+    {
+        $instruments = $this->getProjectSetting('instrument')             ?? [];
+        $colors      = $this->getProjectSetting('progress-bar-bg-color')  ?? [];
+        foreach ($instruments as $i => $inst) {
+            if ($inst === $form) {
+                $color = $colors[$i] ?? '';
+                return !empty($color) ? $color : '#e0e0e0';
+            }
+        }
+        return '#e0e0e0';
+    }
+
+    private function progressBarOuterColor(string $form): string
+    {
+        $instruments = $this->getProjectSetting('instrument')                ?? [];
+        $colors      = $this->getProjectSetting('progress-bar-outer-color')  ?? [];
+        foreach ($instruments as $i => $inst) {
+            if ($inst === $form) {
+                $color = $colors[$i] ?? '';
+                return !empty($color) ? $color : 'transparent';
+            }
+        }
+        return 'transparent';
+    }
+
     /**
      * Build shuffled order. Page 1 always first, page N always last.
      * Returns e.g. [1, 4, 2, 3, 5] for a 5-page survey.
@@ -268,10 +308,13 @@ class SurveyPagesShuffle extends AbstractExternalModule
             $v2r[$vi + 1] = (int)$rp;
         }
 
-        $v2rJson       = json_encode($v2r);
-        $hashesJson    = json_encode($hashes);
-        $remainingJson = json_encode($remaining);
-        $fixProgress   = $this->fixProgressHeader($instrument) ? 'true' : 'false';
+        $v2rJson          = json_encode($v2r);
+        $hashesJson       = json_encode($hashes);
+        $remainingJson    = json_encode($remaining);
+        $fixProgress      = $this->fixProgressHeader($instrument) ? 'true' : 'false';
+        $progressColor    = json_encode($this->progressBarColor($instrument));
+        $progressBgColor  = json_encode($this->progressBarBgColor($instrument));
+        $progressOuterColor = json_encode($this->progressBarOuterColor($instrument));
         ?>
         <script>
         $(function () {
@@ -281,7 +324,10 @@ class SurveyPagesShuffle extends AbstractExternalModule
                 total     = <?= (int)$total ?>,
                 curR      = <?= (int)$curReal ?>,
                 curV      = <?= (int)$curVirtual ?>,
-                fixProgress = <?= $fixProgress ?>;
+                fixProgress = <?= $fixProgress ?>,
+                progressColor = <?= $progressColor ?>,
+                progressBgColor = <?= $progressBgColor ?>,
+                progressOuterColor = <?= $progressOuterColor ?>;
 
             console.log('[SPS] real=' + curR + ' virtual=' + curV + '/' + total
                 + '  order='     + JSON.stringify(v2r)
@@ -300,25 +346,28 @@ class SurveyPagesShuffle extends AbstractExternalModule
                 // Calculate the correct percentage based on virtual position
                 // Page 1 = 0%, last page = 100%
                 var pct = Math.round(((curV - 1) / (total - 1)) * 100);
-                var filledWidth = pct;
-                var emptyWidth = 100 - pct;
+                // Use minimum width for the filled bar so it's always visible
+                // 0% gets a tiny bar, other percentages get at least enough to show text
+                var filledWidth = (pct === 0) ? 1 : Math.max(10, pct);
+                var emptyWidth = 100 - filledWidth;
+                // For 0%, use smaller min-width so the bar appears tiny
+                var minWidthStyle = (pct === 0) ? 'min-width: 30px;' : 'min-width: 50px;';
 
-                // Build the progress bar HTML
+                // Build the progress bar HTML — always show the filled bar
+                // Outer container spans full width (side to side), inner bar is centered
                 var progressHtml =
-                    '<div id="sps-progress-bar" style="width: 100%; max-width: 400px; margin: 10px auto 15px auto;">' +
-                        '<table style="background-color: #e0e0e0; border-radius: 15px; border-collapse: separate; width: 100%;" border="0" cellspacing="0" cellpadding="3">' +
-                            '<tbody><tr>';
+                    '<div id="sps-progress-bar-outer" style="width: 100%; background-color: ' + progressOuterColor + '; padding: 10px 0 15px 0;">' +
+                        '<div id="sps-progress-bar" style="width: 100%; max-width: 400px; margin: 0 auto;">' +
+                            '<table style="background-color: ' + progressBgColor + '; border-radius: 15px; border-collapse: separate; width: 100%;" border="0" cellspacing="0" cellpadding="3">' +
+                                '<tbody><tr>' +
+                                    '<td style="background-color: ' + progressColor + '; height: 25px; border-radius: 12px; text-align: center; color: white; font-weight: bold; font-size: 14px; ' + minWidthStyle + '" width="' + filledWidth + '%">' + pct + '%</td>';
 
-                if (pct > 0) {
-                    progressHtml +=
-                        '<td style="background-color: #7f7776; height: 25px; border-radius: 12px; text-align: center; color: white; font-weight: bold; font-size: 14px; min-width: 50px;" width="' + filledWidth + '%">' + pct + '%</td>';
-                }
-                if (pct < 100) {
+                if (emptyWidth > 0) {
                     progressHtml +=
                         '<td style="background-color: transparent;" width="' + emptyWidth + '%">&nbsp;</td>';
                 }
 
-                progressHtml += '</tr></tbody></table></div>';
+                progressHtml += '</tr></tbody></table></div></div>';
 
                 // Find the best place to inject the progress bar
                 // Try survey title area first, then form container

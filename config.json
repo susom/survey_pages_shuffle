@@ -62,8 +62,38 @@
                     "type": "checkbox"
                 },
                 {
+                    "key": "progress-bar-color",
+                    "name": "Progress bar fill color",
+                    "type": "text",
+                    "default": "#7f7776",
+                    "branchingLogic": {
+                        "field": "fix-progress-header",
+                        "value": "1"
+                    }
+                },
+                {
+                    "key": "progress-bar-bg-color",
+                    "name": "Progress bar background color (empty portion)",
+                    "type": "text",
+                    "default": "#e0e0e0",
+                    "branchingLogic": {
+                        "field": "fix-progress-header",
+                        "value": "1"
+                    }
+                },
+                {
+                    "key": "progress-bar-outer-color",
+                    "name": "Progress bar outer/container background color",
+                    "type": "text",
+                    "default": "transparent",
+                    "branchingLogic": {
+                        "field": "fix-progress-header",
+                        "value": "1"
+                    }
+                },
+                {
                     "key": "fix-progress-note",
-                    "name": "When enabled, the module will inject a visual progress bar at the top of each survey page showing the respondent's progress based on their virtual page position. The progress bar displays the percentage complete and moves continuously from 0% to 100%.",
+                    "name": "When enabled, the module will inject a visual progress bar at the top of each survey page. Enter hex color codes (e.g., #4CAF50 for green) or 'transparent' for the colors.",
                     "type": "descriptive"
                 }
             ]
