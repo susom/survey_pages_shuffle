@@ -140,6 +140,18 @@ class SurveyPagesShuffle extends AbstractExternalModule
         return 'transparent';
     }
 
+    private function progressBarText(string $form): string
+    {
+        $instruments = $this->getProjectSetting('instrument')          ?? [];
+        $texts       = $this->getProjectSetting('progress-bar-text')   ?? [];
+        foreach ($instruments as $i => $inst) {
+            if ($inst === $form) {
+                return $texts[$i] ?? '';
+            }
+        }
+        return '';
+    }
+
     /**
      * Build shuffled order. Page 1 always first, page N always last.
      * Returns e.g. [1, 4, 2, 3, 5] for a 5-page survey.
@@ -315,6 +327,31 @@ class SurveyPagesShuffle extends AbstractExternalModule
         $progressColor    = json_encode($this->progressBarColor($instrument));
         $progressBgColor  = json_encode($this->progressBarBgColor($instrument));
         $progressOuterColor = json_encode($this->progressBarOuterColor($instrument));
+
+        // Process progress bar text with piping
+        $progressText = $this->progressBarText($instrument);
+        if (!empty($progressText)) {
+            // Replace special placeholders first
+            $progressText = str_replace('[current_page]', (string)$curVirtual, $progressText);
+            $progressText = str_replace('[total_pages]', (string)$total, $progressText);
+            $pctValue = round((($curVirtual - 1) / ($total - 1)) * 100);
+            $progressText = str_replace('[percent]', $pctValue . '%', $progressText);
+
+            // Use REDCap's piping for field values if record exists
+            if (!empty($record) && class_exists('Piping')) {
+                $progressText = \Piping::replaceVariablesInLabel(
+                    $progressText,
+                    $record,
+                    $eventId,
+                    1,  // instance
+                    [],  // data (empty = fetch from DB)
+                    true, // replaceWithUnderlineIfMissing
+                    $pid,
+                    false // wrapInSpan
+                );
+            }
+        }
+        $progressTextJson = json_encode($progressText);
         ?>
         <script>
         $(function () {
@@ -327,7 +364,8 @@ class SurveyPagesShuffle extends AbstractExternalModule
                 fixProgress = <?= $fixProgress ?>,
                 progressColor = <?= $progressColor ?>,
                 progressBgColor = <?= $progressBgColor ?>,
-                progressOuterColor = <?= $progressOuterColor ?>;
+                progressOuterColor = <?= $progressOuterColor ?>,
+                progressText = <?= $progressTextJson ?>;
 
             console.log('[SPS] real=' + curR + ' virtual=' + curV + '/' + total
                 + '  order='     + JSON.stringify(v2r)
@@ -367,7 +405,14 @@ class SurveyPagesShuffle extends AbstractExternalModule
                         '<td style="background-color: transparent;" width="' + emptyWidth + '%">&nbsp;</td>';
                 }
 
-                progressHtml += '</tr></tbody></table></div></div>';
+                progressHtml += '</tr></tbody></table>';
+
+                // Add text below the progress bar if configured
+                if (progressText && progressText.length > 0) {
+                    progressHtml += '<div id="sps-progress-bar-text" style="text-align: center; margin-top: 8px; font-size: 14px; color: #333;">' + progressText + '</div>';
+                }
+
+                progressHtml += '</div></div>';
 
                 // Find the best place to inject the progress bar
                 // Try survey title area first, then form container

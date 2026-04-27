@@ -92,6 +92,24 @@
                     }
                 },
                 {
+                    "key": "progress-bar-text",
+                    "name": "Text to display below progress bar (supports piping)",
+                    "type": "text",
+                    "branchingLogic": {
+                        "field": "fix-progress-header",
+                        "value": "1"
+                    }
+                },
+                {
+                    "key": "progress-bar-text-note",
+                    "name": "Enter text to display below the progress bar. Supports REDCap piping syntax (e.g., [field_name]) and special placeholders: [current_page] for virtual page number, [total_pages] for total pages, [percent] for percentage. Example: 'Section [current_page] of [total_pages]' or 'Part [section_number] of [total_sections]' where section_number is a field in your project.",
+                    "type": "descriptive",
+                    "branchingLogic": {
+                        "field": "fix-progress-header",
+                        "value": "1"
+                    }
+                },
+                {
                     "key": "fix-progress-note",
                     "name": "When enabled, the module will inject a visual progress bar at the top of each survey page. Enter hex color codes (e.g., #4CAF50 for green) or 'transparent' for the colors.",
                     "type": "descriptive"

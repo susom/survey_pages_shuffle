@@ -63,6 +63,7 @@ Configure**. Add one row per instrument you want to shuffle:
 | **Progress bar fill color** | *Optional.* The hex color code for the progress bar fill (e.g., `#7f7776`, `#4CAF50`). Defaults to `#7f7776` (brownish-gray). |
 | **Progress bar background color** | *Optional.* The hex color code for the empty portion of the progress bar (e.g., `#e0e0e0`). Defaults to `#e0e0e0` (light gray). |
 | **Progress bar outer/container color** | *Optional.* The hex color code for the full-width banner/stripe that spans the entire survey container behind the progress bar (e.g., `#f0f0f0`, `#ffffff`). Defaults to `transparent`. |
+| **Text below progress bar** | *Optional.* Text to display below the progress bar. Supports REDCap piping syntax and special placeholders. See [Progress Bar Text](#progress-bar-text) for details. |
 
 ---
 
@@ -108,7 +109,42 @@ The progress bar uses inline styles for maximum compatibility. If you need to cu
 #sps-progress-bar td:first-child {
     background-color: #4CAF50 !important;  /* Filled portion */
 }
+#sps-progress-bar-text {
+    font-weight: bold !important;  /* Make text bold */
+}
 ```
+
+### Progress Bar Text
+
+You can display custom text below the progress bar using the **Text below progress bar** setting. This is useful for showing additional context like "Section X of Y" to help participants understand their progress through the overall survey.
+
+#### Special Placeholders
+
+The following placeholders are automatically replaced:
+
+| Placeholder | Description | Example Value |
+|---|---|---|
+| `[current_page]` | Current virtual page number | `3` |
+| `[total_pages]` | Total number of pages | `5` |
+| `[percent]` | Current percentage complete | `50%` |
+
+#### REDCap Piping
+
+You can also use standard REDCap piping syntax to insert field values from the current record. For example, if you have a calculated field `section_number` that tracks which section of a multi-instrument survey the participant is on, you can use:
+
+```
+Section [current_page] of [total_pages]
+```
+
+#### Examples
+
+| Text Setting | Result (on page 3 of 5) |
+|---|---|
+| `Section [current_page] of [total_pages]` | Section 3 of 5 |
+| `Progress: [percent] complete` | Progress: 50% complete |
+| `Part [current_page]/[total_pages] • Overall: Section [section_num] of [total_sec]` | Part 3/5 • Overall: Section 2 of 4 |
+
+> **Note:** REDCap piping for field values requires the record to exist. On page 1 (before the record is created), piped field values may show as underscores or blank.
 
 ---
 
