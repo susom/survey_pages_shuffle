@@ -166,12 +166,27 @@ class SurveyPagesShuffle extends AbstractExternalModule
 
     // ── HOOK 1 — redcap_every_page_before_render ──────────────────────────
     //
-    // Fires BEFORE initPageNumCheck() and setPageNum().
-    // Reads __sps_target__ posted by our JS and:
-    //   • Sets $_GET['__page__'] = target  (page REDCap will render)
-    //   • Sets $_POST['__page__'] = 99999  (sentinel not in $pageFields)
-    //       → setPageNum() skips its ±1 block
-    //       → data-save field-filter skips stripping  → ALL fields saved
+    // Fires BEFORE initPageNumCheck(), checkReqFields(), and setPageNum().
+    //
+    // Reads __sps_target__ + __sps_current__ posted by our JS and:
+    //
+    //   1) FIRST mirrors REDCap's required-field check across all fields on
+    //      the instrument (same set REDCap will validate under our 99999
+    //      sentinel). If any required field is empty, the user must stay on
+    //      the SAME page so they can fix the problem and see the "NOTE: Some
+    //      fields are required!" popup. We:
+    //         • Restore $_POST['__page__']  to the CURRENT real page
+    //         • Restore $_POST['__page_hash__'] to that page's hash
+    //         • Drop __sps_target__ entirely (so the JS-side override is gone)
+    //      REDCap then validates against the current page, sees the empty
+    //      required field, queues the popup, and re-renders the same page.
+    //
+    //   2) Otherwise (validation passes) we proceed with the original
+    //      shuffled-navigation override:
+    //         • $_GET['__page__']       = target  (page REDCap will render)
+    //         • $_POST['__page__']      = 99999  (sentinel not in $pageFields)
+    //             → setPageNum() skips its ±1 block
+    //             → data-save field-filter skips stripping  → ALL fields saved
 
     public function redcap_every_page_before_render($project_id)
     {
@@ -183,16 +198,120 @@ class SurveyPagesShuffle extends AbstractExternalModule
             if (!isset($_POST['__sps_target__']))                 return;
             if (!class_exists('Survey'))                          return;
 
-            $target = (int)$_POST['__sps_target__'];
-            if ($target < 1) return;
+            $target  = (int)$_POST['__sps_target__'];
+            $current = (int)($_POST['__sps_current__'] ?? 1);
+            if ($target < 1)  return;
+            if ($current < 1) $current = 1;
 
+            // Don't enforce required-field validation when the user clicked
+            // "Previous Page" — REDCap itself skips required checks on
+            // backward navigation (see Surveys/index.php line 2096:
+            // `if (!isset($_GET['__prevpage']) ...)`).
+            $action     = $_POST['submit-action'] ?? '';
+            $isPrevPage = ($action === 'submit-btn-saveprevpage');
+
+            if (!$isPrevPage && $this->hasEmptyRequiredFields($_GET['s'])) {
+                // Validation will fail — keep the user on the current real
+                // page so REDCap's "Some fields are required!" popup appears
+                // on the page they actually submitted from.
+                $_POST['__page__']      = (string)$current;
+                $_POST['__page_hash__'] = \Survey::getPageNumHash($current);
+                unset($_POST['__sps_target__'], $_POST['__sps_current__']);
+                error_log("[SPS] Required field(s) empty; staying on real page {$current}.");
+                return;
+            }
+
+            // Validation should pass — apply the shuffled-target override.
             $_GET['__page__']       = $target;
             $_POST['__page__']      = '99999';
             $_POST['__page_hash__'] = \Survey::getPageNumHash(99999);
-            unset($_POST['__sps_target__']);
+            unset($_POST['__sps_target__'], $_POST['__sps_current__']);
 
         } catch (\Throwable $e) {
             error_log("[SPS] before_render: " . $e->getMessage());
+        }
+    }
+
+    /**
+     * Mirrors REDCap's required-field check (DataEntry::checkReqFields) for
+     * the entire instrument. Returns true if any required, non-hidden field
+     * is empty in $_POST. This is the same set of fields REDCap will check
+     * under our 99999 sentinel (which causes REDCap to validate ALL fields
+     * on the form rather than a single page's worth).
+     *
+     * We only check the simplest cases that REDCap's client+server use to
+     * decide whether to display the "NOTE: Some fields are required!"
+     * popup. Edge cases (matrix, embedded, sql, complex action tags) are
+     * left to REDCap — if we miss a case here we simply allow the
+     * navigation to proceed and REDCap's own check still fires; the worst
+     * outcome is an inconsistent page but never a silent data loss.
+     */
+    private function hasEmptyRequiredFields(string $surveyHash): bool
+    {
+        try {
+            // Resolve project + form from the survey hash.
+            $q = db_query(
+                "SELECT s.project_id, s.form_name
+                 FROM redcap_surveys s
+                 JOIN redcap_surveys_participants p ON s.survey_id = p.survey_id
+                 WHERE p.hash = '" . db_escape($surveyHash) . "' LIMIT 1"
+            );
+            if (!$q || db_num_rows($q) === 0) return false;
+            $row  = db_fetch_assoc($q);
+            $pid  = (int)$row['project_id'];
+            $form = $row['form_name'];
+
+            // Required fields posted as hidden via branching get added to
+            // empty-required-field[] by REDCap's own JS — those are
+            // explicitly NOT validated, so exclude them from our check.
+            $hiddenReq = isset($_POST['empty-required-field']) && is_array($_POST['empty-required-field'])
+                ? $_POST['empty-required-field']
+                : [];
+
+            // Iterate required fields on the instrument.
+            $q2 = db_query(
+                "SELECT field_name, element_type, element_enum, misc
+                 FROM redcap_metadata
+                 WHERE project_id = $pid AND form_name = '" . db_escape($form) . "'
+                   AND field_req = 1
+                 ORDER BY field_order"
+            );
+            while ($r = db_fetch_assoc($q2)) {
+                $f = $r['field_name'];
+                if (in_array($f, $hiddenReq, true)) continue;
+
+                // Skip @HIDDEN-style action tags that suppress the field.
+                $misc = (string)($r['misc'] ?? '');
+                if (
+                    strpos($misc, '@HIDDEN-SURVEY') !== false
+                    || preg_match('/(^|\s)@HIDDEN(\s|$)/', $misc)
+                ) continue;
+
+                // Checkbox: at least one box must be checked.
+                if ($r['element_type'] === 'checkbox') {
+                    $hasOne = false;
+                    foreach (array_keys($_POST) as $k) {
+                        if (strpos($k, "__chk__{$f}_RC_") === 0 && $_POST[$k] !== '') {
+                            $hasOne = true;
+                            break;
+                        }
+                    }
+                    if (!$hasOne) return true;
+                    continue;
+                }
+
+                // All other field types: the value must be present and
+                // non-empty in POST. Note: fields on OTHER pages of the
+                // survey are not posted at all (they don't exist in the
+                // current DOM), so isset() will be false for them — we
+                // skip those with the !isset() short-circuit. We only flag
+                // a violation if the field IS posted but is blank.
+                if (isset($_POST[$f]) && $_POST[$f] === '') return true;
+            }
+            return false;
+        } catch (\Throwable $e) {
+            error_log("[SPS] hasEmptyRequiredFields: " . $e->getMessage());
+            return false;  // fail-open: let REDCap handle it
         }
     }
 
@@ -441,12 +560,25 @@ class SurveyPagesShuffle extends AbstractExternalModule
             var form = document.getElementById('form');
             if (!form) return;
 
-            // Hidden field carrying the desired target page to the server
+            // Hidden fields carrying our navigation intent to the server.
+            //   __sps_target__  : virtual page the user wants to navigate to
+            //                     (real page number, post-shuffle)
+            //   __sps_current__ : current real page the user is submitting
+            //                     from. Hook 1 falls back to this page when
+            //                     required-field validation will fail, so
+            //                     REDCap's "Some fields are required!" popup
+            //                     appears on the page the user actually saw.
             var spsField = document.createElement('input');
             spsField.type  = 'hidden';
             spsField.name  = '__sps_target__';
             spsField.value = '';
             form.appendChild(spsField);
+
+            var spsCurField = document.createElement('input');
+            spsCurField.type  = 'hidden';
+            spsCurField.name  = '__sps_current__';
+            spsCurField.value = String(curR);
+            form.appendChild(spsCurField);
 
             var pageField = form.querySelector('input[name="__page__"]');
             var hashField = form.querySelector('input[name="__page_hash__"]');
@@ -467,12 +599,10 @@ class SurveyPagesShuffle extends AbstractExternalModule
                     var nextV = curV + 1;
                     var nextR = v2r[String(nextV)];
 
-                    // If unvisited middle pages remain AND the next natural page
-                    // is not one of them (it is either the last page or an
-                    // already-visited middle page), redirect to the first
-                    // unvisited middle page instead.  This prevents both
-                    // re-visiting already-seen pages after back-navigation AND
-                    // skipping straight to the last page.
+                    // If unvisited middle pages remain AND the next natural
+                    // page is not one of them (it is either the last page
+                    // or an already-visited middle page), redirect to the
+                    // first unvisited middle page instead.
                     if (remaining.length > 0 && remaining.indexOf(nextR) === -1) {
                         console.log('[SPS] Next page (real=' + nextR + ') already visited or is last; redirecting to first unvisited real page ' + remaining[0] + '.');
                         targetR = remaining[0];
@@ -483,24 +613,26 @@ class SurveyPagesShuffle extends AbstractExternalModule
 
                 if (targetR > 0) {
                     spsField.value = String(targetR);
-                    // Set __page__ to the target page with its real hash.
-                    // Hook 1 (redcap_every_page_before_render) will replace this
-                    // with the 99999 sentinel server-side, which bypasses
-                    // setPageNum()'s ±1 and the data-save field filter.
-                    // If Hook 1 is not active, REDCap will still navigate to
-                    // targetR via normal ±1 math (targetR-1 for next, targetR+1
-                    // for prev), so we post targetR∓1 as a safe fallback.
+                    // Set __page__ to a value that, after REDCap's natural
+                    // ±1 math in setPageNum(), would land on targetR. This
+                    // is only used as a FALLBACK when Hook 1 is inactive.
+                    // When Hook 1 is active and validation passes, Hook 1
+                    // replaces __page__ with the 99999 sentinel and forces
+                    // $_GET['__page__'] = targetR directly. When Hook 1 is
+                    // active and validation FAILS, Hook 1 replaces __page__
+                    // with the user's current real page so the warning
+                    // popup appears on the correct page.
                     if (pageField && hashField) {
                         var postPage;
                         if (action === 'submit-btn-saveprevpage') {
-                            postPage = targetR + 1;  // REDCap does posted-1 for prev
+                            postPage = targetR + 1;  // setPageNum does posted-1 for prev
                         } else {
-                            postPage = targetR - 1;  // REDCap does posted+1 for next
+                            postPage = targetR - 1;  // setPageNum does posted+1 for next
                         }
                         pageField.value = String(postPage);
                         hashField.value = hashes[String(postPage)] || '';
                     }
-                    console.log('[SPS] → navigating to real page ' + targetR);
+                    console.log('[SPS] → requested target real page ' + targetR + ' (current real ' + curR + ')');
                 }
 
                 return _orig(ob);
