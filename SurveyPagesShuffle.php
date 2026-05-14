@@ -598,13 +598,22 @@ class SurveyPagesShuffle extends AbstractExternalModule
                     // Next: next virtual page
                     var nextV = curV + 1;
                     var nextR = v2r[String(nextV)];
+                    var lastR = v2r[String(total)];   // pinned last real page
 
-                    // If unvisited middle pages remain AND the next natural
-                    // page is not one of them (it is either the last page
-                    // or an already-visited middle page), redirect to the
-                    // first unvisited middle page instead.
-                    if (remaining.length > 0 && remaining.indexOf(nextR) === -1) {
-                        console.log('[SPS] Next page (real=' + nextR + ') already visited or is last; redirecting to first unvisited real page ' + remaining[0] + '.');
+                    // ONLY redirect when the next natural page is the LAST
+                    // page AND there are still unvisited middle pages.
+                    // This prevents the user from jumping straight to the
+                    // submit page before all middle pages have been seen.
+                    //
+                    // We deliberately do NOT redirect when nextR is an
+                    // already-visited middle page: the user may have just
+                    // navigated backward (e.g. to fix a required field) and
+                    // is now coming forward again. Forcing a jump to
+                    // remaining[0] in that case would skip the page they
+                    // actually want to revisit and could let them bypass
+                    // a required field on a previously-visited page.
+                    if (remaining.length > 0 && nextR === lastR) {
+                        console.log('[SPS] Next page is last (real=' + nextR + ') but middle pages remain ' + JSON.stringify(remaining) + '; redirecting to ' + remaining[0] + '.');
                         targetR = remaining[0];
                     } else {
                         targetR = nextR;
